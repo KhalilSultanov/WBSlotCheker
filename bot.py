@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from aiogram import Bot, Dispatcher, types, BaseMiddleware
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -7,8 +8,6 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeybo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import TELEGRAM_BOT_TOKEN
-import asyncio
-
 from utils import get_acceptance_coefficients
 
 # Логирование
@@ -24,32 +23,14 @@ MAX_MESSAGE_LENGTH = 4000
 # Список коэффициентов для выбора
 COEFFICIENTS = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
 
-ALLOWED_USERS = [1391599879,
-                 466813055,
-                 1856114011,
-                 5495630544,
-                 893576709,]  # Добавьте сюда разрешённые ID пользователей
-
-
-class AuthorizationMiddleware(BaseMiddleware):
-    async def __call__(self, handler, event, data):
-        user = data.get('event_from_user')
-        if user is None:
-            # If the user cannot be determined, you can either block or allow
-            return await handler(event, data)
-
-        user_id = user.id
-
-        if user_id not in ALLOWED_USERS:
-            if event.message:
-                await event.message.answer("🚫 У вас нет доступа к этому боту.")
-            elif event.callback_query:
-                await event.callback_query.answer("🚫 У вас нет доступа к этому боту.", show_alert=True)
-            return  # Stop further processing
-
-        return await handler(event, data)
-
-
+# Разрешённые ID пользователей
+ALLOWED_USERS = [
+    1391599879,
+    466813055,
+    1856114011,
+    5495630544,
+    893576709,
+]  # Добавьте сюда разрешённые ID пользователей
 
 # Список складов с информацией
 WAREHOUSES = [
@@ -71,8 +52,30 @@ WAREHOUSES = [
 ]
 
 # Словарь для хранения данных пользователей
-# Структура: {chat_id: {'selected_warehouses': [], 'selected_coefficients': {warehouse_id: [coefficients]}, 'known_coeffs': {...}, 'last_message_id': None, 'setup_complete': False}}
 user_data = {}
+
+
+class AuthorizationMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        user = data.get('event_from_user')
+        if user is None:
+            # Если пользователь не определен, можно либо заблокировать, либо разрешить
+            return await handler(event, data)
+
+        user_id = user.id
+
+        if user_id not in ALLOWED_USERS:
+            if event.message:
+                await event.message.answer("🚫 У вас нет доступа к этому боту.")
+            elif event.callback_query:
+                await event.callback_query.answer("🚫 У вас нет доступа к этому боту.", show_alert=True)
+            return  # Останавливаем дальнейшую обработку
+
+        return await handler(event, data)
+
+
+# Регистрируем middleware авторизации
+dp.update.middleware.register(AuthorizationMiddleware())
 
 
 # Стартовая команда для запроса складов
@@ -98,9 +101,6 @@ async def cmd_start(message: types.Message):
         resize_keyboard=True
     )
     await message.answer("📋 Нажмите кнопку, чтобы подтвердить выбор складов:", reply_markup=confirm_keyboard)
-
-
-dp.update.middleware.register(AuthorizationMiddleware())
 
 
 # Функция для отправки инлайн-кнопок для выбора складов
@@ -209,6 +209,10 @@ async def send_coefficient_selection(chat_id: int, message: types.Message):
             )
             navigation_buttons.append(confirm_button)
 
+        # Добавляем дополнительные кнопки "Главное Меню"
+        main_menu_button = InlineKeyboardButton(text="🏠 Главное Меню", callback_data="main_menu")
+        navigation_buttons.append(main_menu_button)
+
         # Добавляем навигационные кнопки в клавиатуру
         keyboard_builder.row(*navigation_buttons)
 
@@ -217,7 +221,7 @@ async def send_coefficient_selection(chat_id: int, message: types.Message):
         # Отправляем или обновляем сообщение
         if user_data[chat_id]['last_message_id'] is None:
             sent_message = await message.answer(
-                f"🔢 Выберите коэффициенты для склада {warehouse_name}:",
+                f"🔢 Выберите коэффициенты для склада <b>{warehouse_name}</b>:",
                 reply_markup=inline_keyboard
             )
             user_data[chat_id]['last_message_id'] = sent_message.message_id
@@ -227,7 +231,7 @@ async def send_coefficient_selection(chat_id: int, message: types.Message):
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=user_data[chat_id]['last_message_id'],
-                    text=f"🔢 Выберите коэффициенты для склада {warehouse_name}:",
+                    text=f"🔢 Выберите коэффициенты для склада <b>{warehouse_name}</b>:",
                     reply_markup=inline_keyboard
                 )
                 user_data[chat_id]['last_keyboard'] = inline_keyboard
@@ -259,35 +263,40 @@ async def process_inline_coefficient_selection(callback_query: types.CallbackQue
     await send_coefficient_selection(chat_id, callback_query.message)
 
 
-@dp.callback_query(lambda call: call.data == "next_warehouse")
-async def process_next_warehouse(callback_query: types.CallbackQuery):
+# Обработка навигационных кнопок
+@dp.callback_query(lambda call: call.data in ["next_warehouse", "prev_warehouse", "main_menu"])
+async def process_navigation(callback_query: types.CallbackQuery):
     chat_id = callback_query.message.chat.id
-    warehouse_index = user_data[chat_id]['current_warehouse_index']
-    warehouse_id = user_data[chat_id]['selected_warehouses'][warehouse_index]
+    action = callback_query.data
 
-    # Проверяем, выбраны ли коэффициенты для текущего склада
-    selected_coeffs = user_data[chat_id]['selected_coefficients'].get(warehouse_id, [])
-    if not selected_coeffs:
-        await callback_query.answer("❗️ Пожалуйста, выберите хотя бы один коэффициент.", show_alert=True)
-        return
+    if action == "next_warehouse":
+        warehouse_index = user_data[chat_id]['current_warehouse_index']
+        selected_warehouses = user_data[chat_id]['selected_warehouses']
+        warehouse_id = selected_warehouses[warehouse_index]
 
-    # Увеличиваем индекс только если не на последнем складе
-    if warehouse_index < len(user_data[chat_id]['selected_warehouses']) - 1:
-        user_data[chat_id]['current_warehouse_index'] += 1  # Переходим к следующему складу
-        await send_coefficient_selection(chat_id, callback_query.message)
-    else:
-        await callback_query.answer("Вы на последнем складе.", show_alert=True)
+        # Проверяем, выбраны ли коэффициенты для текущего склада
+        selected_coeffs = user_data[chat_id]['selected_coefficients'].get(warehouse_id, [])
+        if not selected_coeffs:
+            await callback_query.answer("❗️ Пожалуйста, выберите хотя бы один коэффициент.", show_alert=True)
+            return
 
+        # Увеличиваем индекс только если не на последнем складе
+        if warehouse_index < len(selected_warehouses) - 1:
+            user_data[chat_id]['current_warehouse_index'] += 1  # Переходим к следующему складу
+            await send_coefficient_selection(chat_id, callback_query.message)
+        else:
+            await callback_query.answer("Вы на последнем складе.", show_alert=True)
 
-# Обработка нажатия кнопки "⬅️ Назад" для возврата к предыдущему складу
-@dp.callback_query(lambda call: call.data == "prev_warehouse")
-async def process_prev_warehouse(callback_query: types.CallbackQuery):
-    chat_id = callback_query.message.chat.id
-    if user_data[chat_id]['current_warehouse_index'] > 0:
-        user_data[chat_id]['current_warehouse_index'] -= 1  # Переходим к предыдущему складу
-        await send_coefficient_selection(chat_id, callback_query.message)
-    else:
-        await callback_query.answer("Вы на первом складе.", show_alert=True)
+    elif action == "prev_warehouse":
+        if user_data[chat_id]['current_warehouse_index'] > 0:
+            user_data[chat_id]['current_warehouse_index'] -= 1  # Переходим к предыдущему складу
+            await send_coefficient_selection(chat_id, callback_query.message)
+        else:
+            await callback_query.answer("Вы на первом складе.", show_alert=True)
+
+    elif action == "main_menu":
+        await send_main_menu(chat_id, callback_query.message)
+        await callback_query.answer("Перешли в Главное Меню.")
 
 
 # Обработка нажатия кнопки "✅ Подтвердить выбор коэффициентов"
@@ -295,7 +304,8 @@ async def process_prev_warehouse(callback_query: types.CallbackQuery):
 async def process_confirm_coefficients(callback_query: types.CallbackQuery):
     chat_id = callback_query.message.chat.id
     warehouse_index = user_data[chat_id]['current_warehouse_index']
-    warehouse_id = user_data[chat_id]['selected_warehouses'][warehouse_index]
+    selected_warehouses = user_data[chat_id]['selected_warehouses']
+    warehouse_id = selected_warehouses[warehouse_index]
 
     # Проверяем, выбраны ли коэффициенты для текущего склада
     selected_coeffs = user_data[chat_id]['selected_coefficients'].get(warehouse_id, [])
@@ -303,8 +313,13 @@ async def process_confirm_coefficients(callback_query: types.CallbackQuery):
         await callback_query.answer("❗️ Пожалуйста, выберите хотя бы один коэффициент.", show_alert=True)
         return
 
-    # Финализируем выбор
-    await finalize_selection(chat_id, callback_query.message)
+    # Проверяем, обработаны ли все склады
+    if warehouse_index == len(selected_warehouses) - 1:
+        await finalize_selection(chat_id, callback_query.message)
+    else:
+        # Перейти к следующему складу, если он не последний
+        user_data[chat_id]['current_warehouse_index'] += 1
+        await send_coefficient_selection(chat_id, callback_query.message)
 
 
 # Финализация выбора и запуск отслеживания
@@ -321,7 +336,7 @@ async def finalize_selection(chat_id: int, message: types.Message):
         coeffs_text = ", ".join(map(str, coeffs)) if coeffs else "Нет выбранных коэффициентов"
         response_message += f"\n🏢 <b>{warehouse_name}</b>\n🔢 <b>Коэффициенты:</b> {coeffs_text}\n"
 
-    await message.answer(response_message)
+    await message.answer(response_message, parse_mode=ParseMode.HTML)
 
     # Устанавливаем флаг, что настройка завершена
     user_data[chat_id]['setup_complete'] = True
@@ -366,6 +381,19 @@ async def change_warehouse_selection(message: types.Message):
     await message.answer("📋 Нажмите кнопку, чтобы подтвердить выбор складов.", reply_markup=confirm_keyboard)
 
 
+# Функция для отправки Главного Меню
+async def send_main_menu(chat_id: int, message: types.Message):
+    main_menu_keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🔄 Изменить отслеживаемые склады")],
+            [KeyboardButton(text="📜 История коэффициентов")],
+            [KeyboardButton(text="❓ Помощь")]
+        ],
+        resize_keyboard=True
+    )
+    await bot.send_message(chat_id, "🏠 Главное Меню:", reply_markup=main_menu_keyboard)
+
+
 # Функция для обработки коэффициентов для каждого пользователя
 async def process_coefficients_for_user(chat_id: int, data: dict, coefficients: list):
     # Проверяем, завершил ли пользователь настройку
@@ -389,7 +417,7 @@ async def process_coefficients_for_user(chat_id: int, data: dict, coefficients: 
                 known_coeffs_warehouse = known_coeffs.setdefault(warehouse_id, {}).setdefault(coeff_value, [])
                 if date not in known_coeffs_warehouse:
                     warehouse = next((w for w in WAREHOUSES if w['ID'] == warehouse_id), {})
-                    message = (
+                    message_text = (
                         f"📢 <b>Новый коэффициент!</b>\n"
                         f"🏢 <b>Склад:</b> {warehouse.get('name', 'Неизвестный склад')}\n"
                         f"📅 <b>Дата:</b> {date}\n"
@@ -398,7 +426,7 @@ async def process_coefficients_for_user(chat_id: int, data: dict, coefficients: 
                     )
 
                     # Отправляем сообщение о новом коэффициенте
-                    await send_long_message(chat_id, message)
+                    await send_long_message(chat_id, message_text)
 
                     # Обновляем известные коэффициенты для пользователя
                     known_coeffs_warehouse.append(date)
@@ -479,6 +507,25 @@ async def show_help(message: types.Message):
     )
     # Отправляем сообщение с командами без дополнительной клавиатуры
     await message.answer(response_message, parse_mode=ParseMode.HTML)
+
+
+# Обработка кнопок Главного Меню
+@dp.message(lambda message: message.text == "📜 История коэффициентов")
+async def history_button(message: types.Message):
+    await show_history(message)
+
+
+@dp.message(lambda message: message.text == "❓ Помощь")
+async def help_button(message: types.Message):
+    await show_help(message)
+
+
+# Обработка кнопки "Главное Меню" через Callback Query
+@dp.callback_query(lambda call: call.data == "main_menu")
+async def handle_main_menu(callback_query: types.CallbackQuery):
+    chat_id = callback_query.message.chat.id
+    await send_main_menu(chat_id, callback_query.message)
+    await callback_query.answer("Перешли в Главное Меню.")
 
 
 # Асинхронный запуск бота
