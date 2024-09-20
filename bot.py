@@ -21,7 +21,7 @@ dp = Dispatcher()
 MAX_MESSAGE_LENGTH = 4000
 
 # Список коэффициентов для выбора
-COEFFICIENTS = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
+COEFFICIENTS = list(range(0, 21))  # От 0 до 20 включительно
 
 # Разрешённые ID пользователей
 ALLOWED_USERS = [
@@ -404,7 +404,7 @@ async def process_coefficients_for_user(chat_id: int, data: dict, coefficients: 
     selected_coefficients = data.get('selected_coefficients', {})
     known_coeffs = data.setdefault('known_coeffs', {})
 
-    new_coeffs_found = False
+    new_or_changed_coeffs_found = False
 
     for coefficient in coefficients:
         warehouse_id = coefficient['warehouseID']
@@ -413,9 +413,12 @@ async def process_coefficients_for_user(chat_id: int, data: dict, coefficients: 
 
         if warehouse_id in selected_warehouses:
             if coeff_value in selected_coefficients.get(warehouse_id, []):
-                # Проверяем, что этот коэффициент новый для пользователя
-                known_coeffs_warehouse = known_coeffs.setdefault(warehouse_id, {}).setdefault(coeff_value, [])
-                if date not in known_coeffs_warehouse:
+                # Проверяем, что этот коэффициент новый или изменился для пользователя
+                known_coeffs_warehouse = known_coeffs.setdefault(warehouse_id, {})
+                previous_coeff_value = known_coeffs_warehouse.get(date)
+
+                if previous_coeff_value is None:
+                    # Новый коэффициент
                     warehouse = next((w for w in WAREHOUSES if w['ID'] == warehouse_id), {})
                     message_text = (
                         f"📢 <b>Новый коэффициент!</b>\n"
@@ -428,12 +431,31 @@ async def process_coefficients_for_user(chat_id: int, data: dict, coefficients: 
                     # Отправляем сообщение о новом коэффициенте
                     await send_long_message(chat_id, message_text)
 
-                    # Обновляем известные коэффициенты для пользователя
-                    known_coeffs_warehouse.append(date)
-                    new_coeffs_found = True
+                    # Сохраняем коэффициент
+                    known_coeffs_warehouse[date] = coeff_value
+                    new_or_changed_coeffs_found = True
 
-    if not new_coeffs_found:
-        logging.info(f"No new coefficients for chat {chat_id}.")
+                elif previous_coeff_value != coeff_value:
+                    # Коэффициент изменился
+                    warehouse = next((w for w in WAREHOUSES if w['ID'] == warehouse_id), {})
+                    message_text = (
+                        f"🔄 <b>Изменение коэффициента!</b>\n"
+                        f"🏢 <b>Склад:</b> {warehouse.get('name', 'Неизвестный склад')}\n"
+                        f"📅 <b>Дата:</b> {date}\n"
+                        f"📊 <b>Старый коэффициент:</b> {previous_coeff_value}\n"
+                        f"📊 <b>Новый коэффициент:</b> {coeff_value}\n"
+                        f"📦 <b>Тип поставки:</b> {coefficient['boxTypeName']}\n\n"
+                    )
+
+                    # Отправляем сообщение об изменении коэффициента
+                    await send_long_message(chat_id, message_text)
+
+                    # Обновляем коэффициент
+                    known_coeffs_warehouse[date] = coeff_value
+                    new_or_changed_coeffs_found = True
+
+    if not new_or_changed_coeffs_found:
+        logging.info(f"No new or changed coefficients for chat {chat_id}.")
 
 
 # Периодическая проверка новых коэффициентов
@@ -483,14 +505,13 @@ async def show_history(message: types.Message):
         return
 
     response_message = "📜 <b>История коэффициентов:</b>\n\n"
-    for warehouse_id, coeffs in history.items():
+    for warehouse_id, dates in history.items():
         warehouse = next((w for w in WAREHOUSES if w['ID'] == warehouse_id), {})
         warehouse_name = warehouse.get('name', 'Неизвестный склад')
 
         response_message += f"🏢 <b>{warehouse_name}</b>\n"
-        for coeff_value, dates in coeffs.items():
-            dates_text = ", ".join(dates)
-            response_message += f"📊 <b>Коэффициент {coeff_value}:</b> {dates_text}\n"
+        for date, coeff_value in dates.items():
+            response_message += f"📅 <b>Дата:</b> {date} | 📊 <b>Коэффициент:</b> {coeff_value}\n"
         response_message += "\n"
 
     await send_long_message(chat_id, response_message)
