@@ -1,17 +1,28 @@
 import logging
 import asyncio
+import time
+import traceback
+
 from aiogram import Bot, Dispatcher, types, BaseMiddleware
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import TELEGRAM_BOT_TOKEN
 from utils import get_acceptance_coefficients
 
 # Логирование
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.FileHandler("bot_errors.log", encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
 
 # Инициализация бота
 bot = Bot(token=TELEGRAM_BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -550,12 +561,26 @@ async def handle_main_menu(callback_query: types.CallbackQuery):
     await callback_query.answer("Перешли в Главное Меню.")
 
 
-# Асинхронный запуск бота
 async def main():
-    # Запускаем фоновую задачу для периодической проверки новых коэффициентов
+    logging.info("Запуск бота...")
     asyncio.create_task(periodic_check())
-    await dp.start_polling(bot, skip_updates=False)
+    try:
+        await dp.start_polling(bot, skip_updates=False)
+    except Exception as e:
+        logging.error(f"Ошибка в процессе работы бота: {e}")
+        logging.error("Traceback:\n%s", traceback.format_exc())  # Записываем стек вызовов в файл
 
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    while True:
+        try:
+            asyncio.run(main())
+        except Exception as main_e:
+            logging.error(f"Критическая ошибка, бот упал: {main_e}")
+            logging.error("Traceback:\n%s", traceback.format_exc())  # Записываем стек вызовов в файл
+            # Ждём 5 секунд перед повторной попыткой перезапуска
+            time.sleep(5)
+            logging.info("Повторный запуск бота...")
+            continue
+        # Если main завершился без исключений, выходим из цикла
+        break
